@@ -88,21 +88,68 @@ HOST_IP=$(hostname --all-ip-addresses | awk '{print $1}')
 
 curl --cacert public/ca-certificates.crt --resolve "$REGISTRY_HOST:5000:$HOST_IP" -vv "https://$REGISTRY_HOST:5000"
 
-docker rm --force earthly-buildkitd || true
+function reset_earthly_buildkit_and_load_certs {
+    docker rm --force earthly-buildkitd || true
 
-# I don't think this works as I thought it would
-#earthly config global.tlsca "$(pwd)/public/SelfSigned_Root_CA.pem"
+    # start up earthly-buildkitd and prune/reset the cache
+    earthly --buildkit-volume-name=selfhostedregistrytest prune --reset
 
-# start up earthly-buildkitd
-earthly bootstrap
+    # a --reset removes all custom-certs/hosts, need to reload them
 
-# update hosts in earthly container to point to host IP
-docker exec -ti earthly-buildkitd sh -c "echo \"$HOST_IP selfsigned.example.com\" >> /etc/hosts"
+    # update hosts in earthly container to point to host IP
+    docker exec -ti earthly-buildkitd sh -c "echo \"$HOST_IP selfsigned.example.com\" >> /etc/hosts"
 
-docker cp public/SelfSigned_Root_CA.crt earthly-buildkitd:/usr/local/share/ca-certificates/
-docker exec -ti earthly-buildkitd sh -c "update-ca-certificates"
+    docker cp public/SelfSigned_Root_CA.crt earthly-buildkitd:/usr/local/share/ca-certificates/
+    docker exec -ti earthly-buildkitd sh -c "update-ca-certificates"
 
-# Sanity check that root ca cert works
-docker exec -ti earthly-buildkitd sh -c "wget https://selfsigned.example.com:5000 -O - >/dev/null"
+    # Sanity check that root ca cert works after a prune --reset
+    docker exec -ti earthly-buildkitd sh -c "wget https://selfsigned.example.com:5000 -O - >/dev/null"
+}
 
+reset_earthly_buildkit_and_load_certs
+
+# Earthly should now be setup for use with our self-hosted, self-signed registry
+# Continue with testing earthly remote cache behaviour
+
+
+echo " ***********************************************"
+echo " == Running earthly against an empty registry =="
+earthly --buildkit-volume-name=selfhostedregistrytest --use-inline-cache "$SCRIPT_DIR/+test" 2>&1 | tee output.txt
+if grep '*cached*' output.txt >/dev/null; then
+    echo "ERROR: there should not be any cached items"
+    exit 1
+fi
+
+
+echo " ******************************************************"
+echo " == Earthly should push a cache item to the registry =="
+earthly --buildkit-volume-name=selfhostedregistrytest --save-inline-cache --push "$SCRIPT_DIR/+test" 2>&1 | tee output.txt
+if ! grep '*cached*' output.txt >/dev/null; then
+    echo "ERROR: layers should have been cached from the previous build (but not registry)"
+    exit 1
+fi
+
+
+echo " **************************************"
+echo " == run earthly without inline cache =="
+reset_earthly_buildkit_and_load_certs
+earthly --buildkit-volume-name=selfhostedregistrytest "$SCRIPT_DIR/+test" 2>&1 | tee output.txt
+if grep '*cached*' output.txt >/dev/null; then
+    echo "ERROR: there should not be any cached items"
+    exit 1
+fi
+
+
+echo " ***********************************"
+echo " == run earthly with inline cache =="
+reset_earthly_buildkit_and_load_certs
+earthly --buildkit-volume-name=selfhostedregistrytest --use-inline-cache "$SCRIPT_DIR/+test" 2>&1 | tee output.txt
+if ! grep '*cached*' output.txt >/dev/null; then
+    echo "ERROR: layers should have been cached from the self hosted registry, but weren't"
+    exit 1
+fi
+
+
+echo " == done =="
+echo "waiting for docker registry to finish (user must kill it before this script cleans up)"
 docker wait registry-test
