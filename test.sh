@@ -126,7 +126,7 @@ fi
 test_stage="Earthly should push a cache item to the registry"
 docker exec registry-test /bin/sh -c "echo == $test_stage == > /proc/1/fd/1"
 
-# FIXME 
+# FIXME targets referenced by COPYs dont get saved to the regsitry cache
 #    1) maybe a bug? should --save-inline-cache work when no --push is specified?
 #        "earthly --save-inline-cache +euler-bin" doesn't push a cache item
 #
@@ -147,6 +147,20 @@ if ! grep '*cached*' output.txt >/dev/null; then
     exit 1
 fi
 
+# FIXME targets referenced by FROMs dont get saved to the regsitry cache
+# calling +euler-bin includes a FROM +gcc-deps, but +gcc-deps is not being cached
+# As a work-around, we need to call +gcc-deps directly in order to have it pushed
+earthly --buildkit-volume-name=selfhostedregistrytest --save-inline-cache --push "$SCRIPT_DIR/+gcc-deps" 2>&1 | tee output.txt
+
+# Next clear the cache and then build the pi-bin (which shares the same deps as euler-bin)
+test_stage="Earthly should pull in cached gcc-deps and push cache for pi-bin "
+docker exec registry-test /bin/sh -c "echo == $test_stage == > /proc/1/fd/1"
+reset_earthly_buildkit_and_load_certs
+earthly --buildkit-volume-name=selfhostedregistrytest --use-inline-cache --save-inline-cache --push "$SCRIPT_DIR/+pi-bin" 2>&1 | tee output.txt
+if ! grep '*cached*' output.txt >/dev/null; then
+    echo "ERROR: +gcc-deps should have been cached from the self hosted registry, but weren't"
+    exit 1
+fi
 
 # tests that no items are cached when --use-inline-cache is not set
 #test_stage="run earthly without inline cache"
